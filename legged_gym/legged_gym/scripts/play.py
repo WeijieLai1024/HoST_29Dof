@@ -219,51 +219,68 @@ def main() -> None:
         policy = runner.get_inference_policy(device=rl_device)
 
         obs = wrapped_env.get_observations().to(rl_device)
-        total_reward = torch.zeros(args.num_envs, dtype=torch.float32, device=rl_device)
-        success_episodes = 0
         finished_episodes = 0
-        max_head = 0.0
-        max_base = 0.0
-        max_upright = -1.0
-        nonfoot_contact_accum = 0.0
-        clean_support_accum = 0.0
-        log_count = 0
+        success_episodes = 0
+        done_reason_counts = torch.zeros(8, dtype=torch.long, device=wrapped_env.device)
+        episode_length_sum = 0.0
+        episode_max_head_sum = 0.0
+        episode_max_base_sum = 0.0
+        episode_max_upright_sum = 0.0
+        step_nonfoot_contact_sum = 0.0
+        step_clean_support_sum = 0.0
+        step_count = 0
+        running_max_head = 0.0
+        running_max_base = 0.0
+        running_max_upright = -1.0
         for step in range(args.num_steps):
             with torch.inference_mode():
                 actions = policy(obs)
             obs, rewards, dones, extras = wrapped_env.step(actions.to(wrapped_env.device))
             obs = obs.to(rl_device)
-            total_reward += rewards.to(rl_device)
             logs = extras.get("log", {})
             if logs:
-                max_head = max(max_head, float(logs.get("state/max_head_height", 0.0)))
-                max_base = max(max_base, float(logs.get("state/max_base_height", 0.0)))
-                max_upright = max(max_upright, float(logs.get("state/max_uprightness", -1.0)))
-                nonfoot_contact_accum += float(logs.get("state/nonfoot_contact_rate", 0.0))
-                clean_support_accum += float(logs.get("state/clean_support_rate", 0.0))
-                log_count += 1
+                running_max_head = max(running_max_head, float(logs.get("state/max_head_height", 0.0)))
+                running_max_base = max(running_max_base, float(logs.get("state/max_base_height", 0.0)))
+                running_max_upright = max(running_max_upright, float(logs.get("state/max_uprightness", -1.0)))
+                step_nonfoot_contact_sum += float(logs.get("state/nonfoot_contact_rate", 0.0))
+                step_clean_support_sum += float(logs.get("state/clean_support_rate", 0.0))
+                step_count += 1
             if step % 200 == 0:
-                success = logs.get("state/success_hold_rate", None)
-                success_msg = f" success={float(success):.3f}" if success is not None else ""
+                success_rate = success_episodes / max(1, finished_episodes)
                 print(
-                    f"[play] step={step} mean_reward={float(rewards.mean()):.3f}{success_msg} "
-                    f"max_head={max_head:.3f} max_base={max_base:.3f} max_upright={max_upright:.3f}",
+                    f"[play] step={step} mean_reward={float(rewards.mean()):.3f} "
+                    f"episodes={finished_episodes} success_rate={success_rate:.3f} "
+                    f"max_head={running_max_head:.3f} max_base={running_max_base:.3f} "
+                    f"max_upright={running_max_upright:.3f}",
                     flush=True,
                 )
-            done_count = int(dones.sum().item())
+            done_mask = dones.to(wrapped_env.device).bool()
+            done_count = int(done_mask.sum().item())
             if done_count > 0:
+                reasons = env.last_step_done_reason[done_mask].long().clamp(0, done_reason_counts.numel() - 1)
+                done_reason_counts += torch.bincount(reasons, minlength=done_reason_counts.numel())
+                success_episodes += int((reasons == 1).sum().item())
+                episode_length_sum += float(env.last_step_episode_length[done_mask].float().sum().item())
+                episode_max_head_sum += float(env.last_step_max_head_height[done_mask].sum().item())
+                episode_max_base_sum += float(env.last_step_max_base_height[done_mask].sum().item())
+                episode_max_upright_sum += float(env.last_step_max_uprightness[done_mask].sum().item())
                 finished_episodes += done_count
-                if logs:
-                    success_episodes += int(round(float(logs.get("state/success_hold_rate", 0.0)) * done_count))
-                total_reward.zero_()
             if finished_episodes >= args.eval_episodes:
                 break
-        denom = max(1, log_count)
+        denom_steps = max(1, step_count)
+        denom_episodes = max(1, finished_episodes)
+        success_rate = success_episodes / denom_episodes
+        reason_counts = {idx: int(done_reason_counts[idx].item()) for idx in range(done_reason_counts.numel())}
         print(
             f"[play] finished steps={step + 1} finished_episodes={finished_episodes} "
-            f"success_episodes~={success_episodes} max_head={max_head:.3f} max_base={max_base:.3f} "
-            f"max_upright={max_upright:.3f} nonfoot_contact={nonfoot_contact_accum / denom:.3f} "
-            f"clean_support={clean_support_accum / denom:.3f}",
+            f"success_count={success_episodes} success_rate={success_rate:.4f} "
+            f"mean_episode_len={episode_length_sum / denom_episodes:.2f} "
+            f"mean_ep_max_head={episode_max_head_sum / denom_episodes:.3f} "
+            f"mean_ep_max_base={episode_max_base_sum / denom_episodes:.3f} "
+            f"mean_ep_max_upright={episode_max_upright_sum / denom_episodes:.3f} "
+            f"nonfoot_contact={step_nonfoot_contact_sum / denom_steps:.3f} "
+            f"clean_support={step_clean_support_sum / denom_steps:.3f} "
+            f"done_reason_counts={reason_counts}",
             flush=True,
         )
     finally:

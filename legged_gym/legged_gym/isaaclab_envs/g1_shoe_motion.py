@@ -33,6 +33,12 @@ class MotionSchemaSummary:
     policy_to_dataset_joint_order: list[int]
     min_frames: int
     max_frames: int
+    min_duration_s: float
+    max_duration_s: float
+    low_start_min: int
+    low_start_max: int
+    low_start_total: int
+    low_start_zero_files: int
 
 
 @dataclass
@@ -84,6 +90,9 @@ def validate_motion_dataset(
     motion_dir: str | Path,
     selection: str | Path,
     policy_joint_names: list[str] | tuple[str, ...] = XLoco_G1_29DOF_JOINT_NAMES,
+    *,
+    low_start_base_z: float = 0.55,
+    low_start_uprightness: float = 0.50,
 ) -> MotionSchemaSummary:
     """Validate selection YAML and NPZ schema, returning remap metadata."""
 
@@ -91,6 +100,12 @@ def validate_motion_dataset(
     first_joint_order: list[str] | None = None
     min_frames = 10**9
     max_frames = 0
+    min_duration_s = float("inf")
+    max_duration_s = 0.0
+    low_start_min = 10**9
+    low_start_max = 0
+    low_start_total = 0
+    low_start_zero_files = 0
 
     for path in paths:
         with np.load(path, allow_pickle=True) as data:
@@ -121,8 +136,27 @@ def validate_motion_dataset(
                 raise ValueError(f"{path} base_quat_w shape mismatch: {base_quat.shape}")
             if framerate <= 0.0:
                 raise ValueError(f"{path} invalid framerate: {framerate}")
+            if not np.isfinite(joint_pos).all():
+                raise ValueError(f"{path} joint_pos contains non-finite values")
+            if not np.isfinite(base_pos).all():
+                raise ValueError(f"{path} base_pos_w contains non-finite values")
+            if not np.isfinite(base_quat).all():
+                raise ValueError(f"{path} base_quat_w contains non-finite values")
+            quat_norm = np.linalg.norm(base_quat, axis=-1)
+            if np.min(quat_norm) < 0.5 or np.max(quat_norm) > 1.5:
+                raise ValueError(f"{path} base_quat_w norms look invalid: min={quat_norm.min()}, max={quat_norm.max()}")
+            uprightness = _uprightness_wxyz_np(_normalize_quat_np(base_quat))
+            low_start_count = int(((base_pos[:, 2] <= low_start_base_z) | (uprightness <= low_start_uprightness)).sum())
+            if low_start_count == 0:
+                low_start_zero_files += 1
+            duration_s = max(0.0, (joint_pos.shape[0] - 1) / framerate)
             min_frames = min(min_frames, joint_pos.shape[0])
             max_frames = max(max_frames, joint_pos.shape[0])
+            min_duration_s = min(min_duration_s, duration_s)
+            max_duration_s = max(max_duration_s, duration_s)
+            low_start_min = min(low_start_min, low_start_count)
+            low_start_max = max(low_start_max, low_start_count)
+            low_start_total += low_start_count
 
     assert first_joint_order is not None
     remap = [first_joint_order.index(name) for name in policy_joint_names]
@@ -134,6 +168,12 @@ def validate_motion_dataset(
         policy_to_dataset_joint_order=remap,
         min_frames=min_frames,
         max_frames=max_frames,
+        min_duration_s=min_duration_s,
+        max_duration_s=max_duration_s,
+        low_start_min=low_start_min,
+        low_start_max=low_start_max,
+        low_start_total=low_start_total,
+        low_start_zero_files=low_start_zero_files,
     )
 
 

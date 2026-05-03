@@ -30,6 +30,8 @@ from legged_gym.isaaclab_envs.g1_shoe_constants import (
     DEFAULT_MOTION_SELECTION,
     HEAD_BODY_NAME,
     HISTORY_LENGTH,
+    HIP_POSTURE_JOINT_NAMES,
+    KNEE_POSTURE_JOINT_NAMES,
     LEFT_FOOT_BODY_NAME,
     LEG_JOINT_NAMES,
     NONFOOT_CONTACT_BODY_NAMES,
@@ -301,6 +303,17 @@ class HostG1ShoeDirectEnv(DirectRLEnv):
         self.max_base_height = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.max_uprightness = torch.full((self.num_envs,), -1.0, dtype=torch.float32, device=self.device)
         self.last_done_reason = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.last_step_done_reason = torch.zeros_like(self.last_done_reason)
+        self.last_step_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.last_step_reference_timeout = torch.zeros_like(self.last_step_success)
+        self.last_step_episode_timeout = torch.zeros_like(self.last_step_success)
+        self.last_step_terminated = torch.zeros_like(self.last_step_success)
+        self.last_step_episode_length = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.last_step_max_head_height = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.last_step_max_base_height = torch.zeros_like(self.last_step_max_head_height)
+        self.last_step_max_uprightness = torch.zeros_like(self.last_step_max_head_height)
+        self.reset_mode_counts = torch.zeros(2, dtype=torch.long, device=self.device)
+        self.reset_repair_count = torch.zeros((), dtype=torch.long, device=self.device)
 
         self.motion_bank: HostG1MotionBank | None = None
         self.motion_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -404,8 +417,24 @@ class HostG1ShoeDirectEnv(DirectRLEnv):
         self.waist_policy_ids = torch.tensor(
             [policy_name_to_idx[name] for name in WAIST_JOINT_NAMES], dtype=torch.long, device=self.device
         )
+        self.hip_posture_policy_ids = torch.tensor(
+            [policy_name_to_idx[name] for name in HIP_POSTURE_JOINT_NAMES], dtype=torch.long, device=self.device
+        )
+        self.knee_posture_policy_ids = torch.tensor(
+            [policy_name_to_idx[name] for name in KNEE_POSTURE_JOINT_NAMES], dtype=torch.long, device=self.device
+        )
         self.leg_target_policy = torch.tensor(
             [STANDUP_LEG_TARGET_POS[name] for name in LEG_JOINT_NAMES],
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(0)
+        self.hip_target_policy = torch.tensor(
+            [DEFAULT_JOINT_POS[name] for name in HIP_POSTURE_JOINT_NAMES],
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(0)
+        self.knee_target_policy = torch.tensor(
+            [DEFAULT_JOINT_POS[name] for name in KNEE_POSTURE_JOINT_NAMES],
             dtype=torch.float32,
             device=self.device,
         ).unsqueeze(0)
@@ -522,12 +551,22 @@ class HostG1ShoeDirectEnv(DirectRLEnv):
             "state/max_head_height": self.max_head_height.mean(),
             "state/max_base_height": self.max_base_height.mean(),
             "state/max_uprightness": self.max_uprightness.mean(),
-            "state/done_reason": self.last_done_reason.float().mean(),
+            "state/done_reason": self.last_step_done_reason.float().mean(),
+            "state/done_success_rate": self.last_step_success.float().mean(),
+            "state/done_reference_timeout_rate": self.last_step_reference_timeout.float().mean(),
+            "state/done_episode_timeout_rate": self.last_step_episode_timeout.float().mean(),
+            "state/done_terminated_rate": self.last_step_terminated.float().mean(),
+            "state/reset_motion_rate": self.reset_mode_counts[0].float() / self.reset_mode_counts.sum().clamp_min(1),
+            "state/reset_synthetic_rate": self.reset_mode_counts[1].float() / self.reset_mode_counts.sum().clamp_min(1),
+            "state/reset_repair_count": self.reset_repair_count.float(),
         }
         self.last_joint_vel.copy_(self.robot.data.joint_vel)
         return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        self.max_head_height = torch.maximum(self.max_head_height, self._head_height_above_sole())
+        self.max_base_height = torch.maximum(self.max_base_height, self._base_height_above_sole())
+        self.max_uprightness = torch.maximum(self.max_uprightness, self._uprightness())
         success_step = self._success_step_mask()
         self.success_hold_counter = torch.where(
             success_step, self.success_hold_counter + 1, torch.zeros_like(self.success_hold_counter)
@@ -545,14 +584,26 @@ class HostG1ShoeDirectEnv(DirectRLEnv):
         reference_timeout = self._reference_exhausted()
         time_out = success | reference_timeout | episode_timeout
 
-        self.last_done_reason[:] = 0
-        self.last_done_reason = torch.where(success, torch.full_like(self.last_done_reason, 1), self.last_done_reason)
-        self.last_done_reason = torch.where(reference_timeout, torch.full_like(self.last_done_reason, 2), self.last_done_reason)
-        self.last_done_reason = torch.where(episode_timeout, torch.full_like(self.last_done_reason, 3), self.last_done_reason)
-        self.last_done_reason = torch.where(fallen_through, torch.full_like(self.last_done_reason, 4), self.last_done_reason)
-        self.last_done_reason = torch.where(joint_vel_bad, torch.full_like(self.last_done_reason, 5), self.last_done_reason)
-        self.last_done_reason = torch.where(root_vel_bad, torch.full_like(self.last_done_reason, 6), self.last_done_reason)
-        self.last_done_reason = torch.where(~finite, torch.full_like(self.last_done_reason, 7), self.last_done_reason)
+        done = terminated | time_out
+        reason = torch.zeros_like(self.last_done_reason)
+        reason = torch.where(success, torch.full_like(reason, 1), reason)
+        reason = torch.where((reason == 0) & reference_timeout, torch.full_like(reason, 2), reason)
+        reason = torch.where((reason == 0) & episode_timeout, torch.full_like(reason, 3), reason)
+        reason = torch.where((reason == 0) & fallen_through, torch.full_like(reason, 4), reason)
+        reason = torch.where((reason == 0) & joint_vel_bad, torch.full_like(reason, 5), reason)
+        reason = torch.where((reason == 0) & root_vel_bad, torch.full_like(reason, 6), reason)
+        reason = torch.where((reason == 0) & (~finite), torch.full_like(reason, 7), reason)
+        reason = torch.where(done, reason, torch.zeros_like(reason))
+        self.last_done_reason = reason
+        self.last_step_done_reason = reason.clone()
+        self.last_step_success = success.clone()
+        self.last_step_reference_timeout = reference_timeout.clone()
+        self.last_step_episode_timeout = episode_timeout.clone()
+        self.last_step_terminated = terminated.clone()
+        self.last_step_episode_length = torch.where(done, self.episode_length_buf.clone(), torch.zeros_like(self.episode_length_buf))
+        self.last_step_max_head_height = torch.where(done, self.max_head_height.clone(), torch.zeros_like(self.max_head_height))
+        self.last_step_max_base_height = torch.where(done, self.max_base_height.clone(), torch.zeros_like(self.max_base_height))
+        self.last_step_max_uprightness = torch.where(done, self.max_uprightness.clone(), torch.zeros_like(self.max_uprightness))
         return terminated, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -564,6 +615,8 @@ class HostG1ShoeDirectEnv(DirectRLEnv):
 
         count = env_ids.numel()
         use_motion = self._sample_motion_reset_mask(count)
+        self.reset_mode_counts[0] += use_motion.sum()
+        self.reset_mode_counts[1] += (~use_motion).sum()
 
         if use_motion.any():
             self._reset_from_motion(env_ids[use_motion])
@@ -582,7 +635,6 @@ class HostG1ShoeDirectEnv(DirectRLEnv):
         self.max_head_height[env_ids] = 0.0
         self.max_base_height[env_ids] = 0.0
         self.max_uprightness[env_ids] = -1.0
-        self.last_done_reason[env_ids] = 0
 
     def _sample_motion_reset_mask(self, count: int) -> torch.Tensor:
         if self.motion_bank is None or not self.cfg.use_motion_reference or self.cfg.reset_mode == "synthetic":
@@ -614,6 +666,9 @@ class HostG1ShoeDirectEnv(DirectRLEnv):
         joint_vel[:, self.policy_joint_ids] = state["joint_vel"]
         self._apply_grouped_joint_noise(joint_pos, scale=0.5)
         joint_pos = self._clip_joint_pos(env_ids, joint_pos)
+        root_pose, root_vel, joint_pos, joint_vel = self._preflight_reset_state(
+            env_ids, root_pose, root_vel, joint_pos, joint_vel
+        )
 
         self.robot.write_root_pose_to_sim(root_pose, env_ids)
         self.robot.write_root_velocity_to_sim(root_vel, env_ids)
@@ -724,8 +779,12 @@ class HostG1ShoeDirectEnv(DirectRLEnv):
         root_pos[:, 1] += torch.empty(count, dtype=torch.float32, device=self.device).uniform_(-0.1, 0.1)
         root_pos[:, 2] = z
         root_quat = math_utils.quat_from_euler_xyz(roll, pitch, yaw)
+        root_pose = torch.cat([root_pos, root_quat], dim=-1)
+        root_pose, root_vel, joint_pos, joint_vel = self._preflight_reset_state(
+            env_ids, root_pose, root_vel, joint_pos, joint_vel
+        )
 
-        self.robot.write_root_pose_to_sim(torch.cat([root_pos, root_quat], dim=-1), env_ids)
+        self.robot.write_root_pose_to_sim(root_pose, env_ids)
         self.robot.write_root_velocity_to_sim(root_vel, env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
@@ -753,6 +812,44 @@ class HostG1ShoeDirectEnv(DirectRLEnv):
     def _clip_joint_pos(self, env_ids: torch.Tensor, joint_pos: torch.Tensor) -> torch.Tensor:
         limits = self.robot.data.soft_joint_pos_limits[env_ids]
         return torch.maximum(torch.minimum(joint_pos, limits[:, :, 1]), limits[:, :, 0])
+
+    def _preflight_reset_state(
+        self,
+        env_ids: torch.Tensor,
+        root_pose: torch.Tensor,
+        root_vel: torch.Tensor,
+        joint_pos: torch.Tensor,
+        joint_vel: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        defaults = self.robot.data.default_joint_pos[env_ids]
+        joint_bad = ~torch.isfinite(joint_pos).all(dim=1)
+        joint_vel_bad = ~torch.isfinite(joint_vel).all(dim=1)
+        root_pose_bad = ~torch.isfinite(root_pose).all(dim=1)
+        root_vel_bad = ~torch.isfinite(root_vel).all(dim=1)
+        low_root = root_pose[:, 2] < self.cfg.reference_root_min_z
+
+        joint_pos = torch.where(torch.isfinite(joint_pos), joint_pos, defaults)
+        joint_vel = torch.nan_to_num(joint_vel, nan=0.0, posinf=0.0, neginf=0.0)
+        root_vel = torch.nan_to_num(root_vel, nan=0.0, posinf=0.0, neginf=0.0)
+
+        if root_pose_bad.any():
+            bad_ids = torch.nonzero(root_pose_bad, as_tuple=False).squeeze(-1)
+            root_pose[bad_ids, :3] = self.scene.env_origins[env_ids[bad_ids]]
+            root_pose[bad_ids, 2] = self.cfg.reference_root_min_z
+            root_pose[bad_ids, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=self.device)
+
+        root_pose[:, 2] = root_pose[:, 2].clamp(min=self.cfg.reference_root_min_z, max=1.25)
+        quat = root_pose[:, 3:7]
+        quat_norm = torch.linalg.norm(quat, dim=1, keepdim=True)
+        quat_bad = quat_norm.squeeze(-1) < 1.0e-6
+        quat = quat / quat_norm.clamp_min(1.0e-6)
+        if quat_bad.any():
+            quat[quat_bad] = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=self.device)
+        root_pose[:, 3:7] = quat
+
+        repaired = joint_bad | joint_vel_bad | root_pose_bad | root_vel_bad | low_root | quat_bad
+        self.reset_repair_count += repaired.sum()
+        return root_pose, root_vel, joint_pos, joint_vel
 
     def _reward_group_task(self) -> torch.Tensor:
         uprightness = self._uprightness()
@@ -833,6 +930,8 @@ class HostG1ShoeDirectEnv(DirectRLEnv):
         q = self.robot.data.joint_pos[:, self.policy_joint_ids]
         pos_limit = (lower - q).clamp(min=0.0) + (q - upper).clamp(min=0.0)
         vel_limit = (torch.abs(joint_vel) / vel_limits - 0.9).clamp(min=0.0)
+        hip_posture = torch.mean(torch.square(q[:, self.hip_posture_policy_ids] - self.hip_target_policy), dim=1)
+        knee_posture = torch.mean(torch.square(q[:, self.knee_posture_policy_ids] - self.knee_target_policy), dim=1)
 
         return (
             -0.05 * torch.sum(torch.square(self.actions - self.last_actions), dim=1)
@@ -842,6 +941,8 @@ class HostG1ShoeDirectEnv(DirectRLEnv):
             -2.0e-7 * torch.sum(torch.square(joint_acc), dim=1)
             -5.0 * torch.sum(pos_limit, dim=1)
             -0.5 * torch.sum(vel_limit, dim=1)
+            -0.15 * hip_posture
+            -0.15 * knee_posture
         )
 
     def _reference_state(self) -> dict[str, torch.Tensor]:

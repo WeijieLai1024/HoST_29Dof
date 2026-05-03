@@ -75,7 +75,7 @@ SOLE_POINT_OFFSETS = (
 SUCCESS_THRESHOLDS = {
     "hold_time_s": 1.0,
     "base_height": 0.68,
-    "head_height": 1.10,
+    "head_height": 0.72,
     "uprightness": 0.92,
     "base_lin_xy": 0.30,
     "base_lin_z": 0.20,
@@ -87,8 +87,17 @@ SUCCESS_THRESHOLDS = {
 NONFOOT_CONTACT_BODY_NAMES = (
     "pelvis",
     "torso_link",
+    HEAD_BODY_NAME,
+    "left_hip_roll_link",
+    "right_hip_roll_link",
     "left_knee_link",
     "right_knee_link",
+    "left_shoulder_pitch_link",
+    "right_shoulder_pitch_link",
+    "left_shoulder_roll_link",
+    "right_shoulder_roll_link",
+    "left_shoulder_yaw_link",
+    "right_shoulder_yaw_link",
     "left_wrist_yaw_link",
     "right_wrist_yaw_link",
     "left_elbow_link",
@@ -176,6 +185,17 @@ LEG_JOINT_NAMES = [
 
 WAIST_JOINT_NAMES = ["waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint"]
 
+HIP_POSTURE_JOINT_NAMES = [
+    "left_hip_pitch_joint",
+    "right_hip_pitch_joint",
+    "left_hip_roll_joint",
+    "right_hip_roll_joint",
+    "left_hip_yaw_joint",
+    "right_hip_yaw_joint",
+]
+
+KNEE_POSTURE_JOINT_NAMES = ["left_knee_joint", "right_knee_joint"]
+
 UPPER_BODY_JOINT_NAMES = [
     "left_shoulder_pitch_joint",
     "right_shoulder_pitch_joint",
@@ -254,6 +274,125 @@ def _joint_scale(name: str) -> float:
 
 ACTION_SCALE = {name: _joint_scale(name) for name in XLoco_G1_29DOF_JOINT_NAMES}
 ACTION_SCALE_IN_POLICY_ORDER = [ACTION_SCALE[name] for name in XLoco_G1_29DOF_JOINT_NAMES]
+
+ACTION_SCALE_EXPECTED_RANGES = {
+    "hip_pitch_yaw_waist_yaw": (0.52, 0.58),
+    "hip_roll_knee": (0.33, 0.37),
+    "ankle_waist_roll_pitch": (0.41, 0.46),
+    "shoulder_elbow_wrist_roll": (0.41, 0.46),
+    "wrist_pitch_yaw": (0.06, 0.09),
+}
+
+ACTION_SCALE_GROUPS = {
+    "hip_pitch_yaw_waist_yaw": [
+        "left_hip_pitch_joint",
+        "right_hip_pitch_joint",
+        "left_hip_yaw_joint",
+        "right_hip_yaw_joint",
+        "waist_yaw_joint",
+    ],
+    "hip_roll_knee": [
+        "left_hip_roll_joint",
+        "right_hip_roll_joint",
+        "left_knee_joint",
+        "right_knee_joint",
+    ],
+    "ankle_waist_roll_pitch": [
+        "left_ankle_pitch_joint",
+        "right_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_ankle_roll_joint",
+        "waist_roll_joint",
+        "waist_pitch_joint",
+    ],
+    "shoulder_elbow_wrist_roll": [
+        "left_shoulder_pitch_joint",
+        "right_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "right_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "right_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "right_elbow_joint",
+        "left_wrist_roll_joint",
+        "right_wrist_roll_joint",
+    ],
+    "wrist_pitch_yaw": [
+        "left_wrist_pitch_joint",
+        "right_wrist_pitch_joint",
+        "left_wrist_yaw_joint",
+        "right_wrist_yaw_joint",
+    ],
+}
+
+ACTUATOR_JOINT_GROUPS = {
+    "legs": [
+        "left_hip_yaw_joint",
+        "right_hip_yaw_joint",
+        "left_hip_roll_joint",
+        "right_hip_roll_joint",
+        "left_hip_pitch_joint",
+        "right_hip_pitch_joint",
+        "left_knee_joint",
+        "right_knee_joint",
+    ],
+    "feet": [
+        "left_ankle_pitch_joint",
+        "right_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_ankle_roll_joint",
+    ],
+    "waist": ["waist_roll_joint", "waist_pitch_joint"],
+    "waist_yaw": ["waist_yaw_joint"],
+    "arms": [
+        "left_shoulder_pitch_joint",
+        "right_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "right_shoulder_roll_joint",
+        "left_shoulder_yaw_joint",
+        "right_shoulder_yaw_joint",
+        "left_elbow_joint",
+        "right_elbow_joint",
+        "left_wrist_roll_joint",
+        "right_wrist_roll_joint",
+        "left_wrist_pitch_joint",
+        "right_wrist_pitch_joint",
+        "left_wrist_yaw_joint",
+        "right_wrist_yaw_joint",
+    ],
+}
+
+ACTUATOR_EFFORT_LIMITS = {
+    "left_hip_pitch_joint": 88.0,
+    "right_hip_pitch_joint": 88.0,
+    "left_hip_yaw_joint": 88.0,
+    "right_hip_yaw_joint": 88.0,
+    "left_hip_roll_joint": 139.0,
+    "right_hip_roll_joint": 139.0,
+    "left_knee_joint": 139.0,
+    "right_knee_joint": 139.0,
+    "left_ankle_pitch_joint": 50.0,
+    "right_ankle_pitch_joint": 50.0,
+    "left_ankle_roll_joint": 50.0,
+    "right_ankle_roll_joint": 50.0,
+    "waist_yaw_joint": 88.0,
+    "waist_roll_joint": 50.0,
+    "waist_pitch_joint": 50.0,
+    "left_shoulder_pitch_joint": 25.0,
+    "right_shoulder_pitch_joint": 25.0,
+    "left_shoulder_roll_joint": 25.0,
+    "right_shoulder_roll_joint": 25.0,
+    "left_shoulder_yaw_joint": 25.0,
+    "right_shoulder_yaw_joint": 25.0,
+    "left_elbow_joint": 25.0,
+    "right_elbow_joint": 25.0,
+    "left_wrist_roll_joint": 25.0,
+    "right_wrist_roll_joint": 25.0,
+    "left_wrist_pitch_joint": 5.0,
+    "right_wrist_pitch_joint": 5.0,
+    "left_wrist_yaw_joint": 5.0,
+    "right_wrist_yaw_joint": 5.0,
+}
 
 KEYFRAME_ATTACHMENTS = {
     "keyframe_head_link": ("torso_link", "0 0 0.45"),
@@ -359,6 +498,10 @@ def ensure_host_g1_shoe_urdf() -> Path:
 def parse_urdf_contract(path: Path) -> dict[str, set[str] | list[str]]:
     root = ET.parse(path).getroot()
     links = {element.attrib["name"] for element in root.findall("link") if "name" in element.attrib}
+    collision_links = {
+        element.attrib["name"] for element in root.findall("link") if "name" in element.attrib and element.findall("collision")
+    }
+    fixed_joint_children = []
     joints = []
     moving_joints = []
     for element in root.findall("joint"):
@@ -369,7 +512,17 @@ def parse_urdf_contract(path: Path) -> dict[str, set[str] | list[str]]:
         joints.append(name)
         if joint_type not in ("fixed", "floating"):
             moving_joints.append(name)
-    return {"links": links, "joints": joints, "moving_joints": moving_joints}
+        else:
+            child = element.find("child")
+            if child is not None and child.attrib.get("link"):
+                fixed_joint_children.append(child.attrib["link"])
+    return {
+        "links": links,
+        "collision_links": collision_links,
+        "fixed_joint_children": fixed_joint_children,
+        "joints": joints,
+        "moving_joints": moving_joints,
+    }
 
 
 def match_action_scale(scale_by_pattern: dict[str, float], joint_name: str) -> float:
